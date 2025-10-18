@@ -43,6 +43,12 @@ class NissanLeafBattery : public CanBattery {
   uint8_t calculate_crc(CAN_frame& frame);
 
  private:
+  static const int CHARGER_STATUS_IDLE = 0x28;
+  static const int CHARGER_STATUS_PLUGGED_IN_TIMER_WAIT = 0x30;
+  static const int CHARGER_STATUS_FINISHED = 0x40;
+  static const int CHARGER_STATUS_CHARGING = 0x60;
+  static const int CHARGER_STATUS_QUICK_CHARGING = 0xB0;
+
   static const int MAX_PACK_VOLTAGE_DV = 4040;  //5000 = 500.0V
   static const int MIN_PACK_VOLTAGE_DV = 2600;
   static const int MAX_CELL_DEVIATION_MV = 150;
@@ -50,6 +56,8 @@ class NissanLeafBattery : public CanBattery {
   static const int MIN_CELL_VOLTAGE_MV = 2700;  //Battery is put into emergency stop if one cell goes below this value
 
   bool is_message_corrupt(CAN_frame rx_frame);
+  uint8_t calculate_csum_380(CAN_frame& frame);
+  uint8_t calculate_csum_5BF(CAN_frame& frame);
 
   DATALAYER_BATTERY_TYPE* datalayer_battery;
   DATALAYER_INFO_NISSAN_LEAF* datalayer_nissan;
@@ -67,70 +75,19 @@ class NissanLeafBattery : public CanBattery {
   uint8_t mprun100 = 0;                 //counter 0-3
   uint8_t counter_3B8 = 0;              //counter 0-14
   bool flip_3B8 = false;
+  uint8_t checksum = 0;
 
-  static const uint8_t ZE0_BATTERY = 0;
-  static const uint8_t AZE0_BATTERY = 1;
-  static const uint8_t ZE1_BATTERY = 2;
-
-  // These CAN messages need to be sent towards the battery to keep it alive
-  CAN_frame LEAF_1F2 = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 8,
-                        .ID = 0x1F2,
-                        .data = {0x10, 0x64, 0x00, 0xB0, 0x00, 0x1E, 0x00, 0x8F}};
-  CAN_frame LEAF_50B = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 7,
-                        .ID = 0x50B,
-                        .data = {0x00, 0x00, 0x06, 0xC0, 0x00, 0x00, 0x00}};
-  CAN_frame LEAF_50C = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 6,
-                        .ID = 0x50C,
-                        .data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame LEAF_1D4 = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 8,
-                        .ID = 0x1D4,
-                        .data = {0x6E, 0x6E, 0x00, 0x04, 0x07, 0x46, 0xE0, 0x44}};
-  // Extra CAN messages for ZE1 batteries
-  CAN_frame LEAF_355 = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 8,
-                        .ID = 0x355,
-                        .data = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x40, 0x00}};
-  CAN_frame LEAF_3B8 = {.FD = false, .ext_ID = false, .DLC = 5, .ID = 0x3B8, .data = {0x7F, 0xE8, 0x01, 0x07, 0xFF}};
-  CAN_frame LEAF_5C5 = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 8,
-                        .ID = 0x5C5,
-                        .data = {0x40, 0x01, 0x2F, 0x5E, 0x00, 0x00, 0x00, 0x00}};
-  CAN_frame LEAF_5EC = {.FD = false, .ext_ID = false, .DLC = 1, .ID = 0x5EC, .data = {0x00}};
-  CAN_frame LEAF_626 = {.FD = false,
-                        .ext_ID = false,
-                        .DLC = 6,
-                        .ID = 0x626,
-                        .data = {0x02, 0x00, 0xff, 0x1d, 0x20, 0x00}};
-  // Active polling messages
-  uint8_t PIDgroups[7] = {0x01, 0x02, 0x04, 0x06, 0x83, 0x84, 0x90};
-  uint8_t PIDindex = 0;
-  CAN_frame LEAF_GROUP_REQUEST = {.FD = false,
-                                  .ext_ID = false,
-                                  .DLC = 8,
-                                  .ID = 0x79B,
-                                  .data = {2, 0x21, 1, 0, 0, 0, 0, 0}};
-  CAN_frame LEAF_NEXT_LINE_REQUEST = {.FD = false,
-                                      .ext_ID = false,
-                                      .DLC = 8,
-                                      .ID = 0x79B,
-                                      .data = {0x30, 1, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
-
-  // The Li-ion battery controller only accepts a multi-message query. In fact, the LBC transmits many
-  // groups: the first one contains lots of High Voltage battery data as SOC, currents, and voltage; the second
-  // replies with all the battery’s cells voltages in millivolt, the third and the fifth one are still unknown, the
-  // fourth contains the four battery packs temperatures, and the last one tells which cell has the shunt active.
-  // There are also two more groups: group 61, which replies with lots of CAN messages (up to 48); here we
-  // found the SOH value, and group 84 that replies with the HV battery production serial.
+  CAN_frame CHARGER_380 = {.FD = false,
+                           .ext_ID = false,
+                           .DLC = 8,
+                           .ID = 0x380,
+                           .data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  CAN_frame CHARGER_5BF = {.FD = false,
+                           .ext_ID = false,
+                           .DLC = 8,
+                           .ID = 0x5BF,
+                           .data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+  CAN_frame CHARGER_679 = {.FD = false, .ext_ID = false, .DLC = 1, .ID = 0x679, .data = {0x00}};
 
   uint8_t crctable[256] = {
       0,   133, 143, 10,  155, 30,  20,  145, 179, 54,  60,  185, 40,  173, 167, 34,  227, 102, 108, 233, 120, 253,
@@ -147,7 +104,6 @@ class NissanLeafBattery : public CanBattery {
       32,  165, 52,  177, 187, 62,  28,  153, 147, 22,  135, 2,   8,   141};
 
   //Nissan LEAF battery parameters from constantly sent CAN
-  uint8_t LEAF_battery_Type = ZE0_BATTERY;
   bool battery_can_alive = false;
 #define WH_PER_GID 77                          //One GID is this amount of Watt hours
   uint16_t battery_Discharge_Power_Limit = 0;  //Limit in kW

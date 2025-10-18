@@ -200,6 +200,8 @@ typedef struct {
 } DATALAYER_BATTERY_TYPE;
 
 struct DATALAYER_CHARGER_TYPE {
+  bool plug_detected = false;
+
   /** Charger setpoint voltage */
   float charger_setpoint_HV_VDC = 0;
   /** Charger setpoint current */
