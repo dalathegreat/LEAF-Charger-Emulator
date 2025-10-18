@@ -11,7 +11,6 @@
 #include "src/communication/can/comm_can.h"
 #include "src/communication/nvm/comm_nvm.h"
 #include "src/datalayer/datalayer.h"
-#include "src/devboard/sdcard/sdcard.h"
 #include "src/devboard/utils/events.h"
 #include "src/devboard/utils/led_handler.h"
 #include "src/devboard/utils/logging.h"
@@ -21,19 +20,33 @@
 #include "src/devboard/utils/value_mapping.h"
 #include "src/devboard/webserver/webserver.h"
 #include "src/devboard/wifi/wifi.h"
+#include "src/inverter/INVERTERS.h"
+#include "src/vehicle/VEHICLES.h"
+
+#if !defined(HW_LILYGO) && !defined(HW_LILYGO2CAN) && !defined(HW_STARK) && !defined(HW_3LB) && !defined(HW_DEVKIT)
+#error You must select a target hardware!
+#endif
 
 // The current software version, shown on webserver
-const char* version_number = "1.0.dev";
+const char* version_number = "v.0.dev";
 
 // Interval timers
 volatile unsigned long currentMillis = 0;
 unsigned long previousMillis10ms = 0;
 unsigned long previousMillisUpdateVal = 0;
 // Task time measurement for debugging
+MyTimer core_task_timer_10s(INTERVAL_10_S);
+uint64_t start_time_10ms = 0;
+uint64_t start_time_values = 0;
+uint64_t start_time_cantx = 0;
 TaskHandle_t main_loop_task;
 TaskHandle_t connectivity_loop_task;
+TaskHandle_t logging_loop_task;
 
 Logging logging;
+
+std::string http_username;  //TODO, move?
+std::string http_password;  //TODO, move?
 
 static std::list<Transmitter*> transmitters;
 void register_transmitter(Transmitter* transmitter) {
@@ -146,17 +159,57 @@ void core_loop(void*) {
 
   while (true) {
 
+    START_TIME_MEASUREMENT(all);
+    START_TIME_MEASUREMENT(comm);
+
     // Input, Runs as fast as possible
     receive_can();  // Receive CAN messages
 
+    END_TIME_MEASUREMENT_MAX(comm, datalayer.system.status.time_comm_us);
+
+    START_TIME_MEASUREMENT(ota);
     ElegantOTA.loop();
+    END_TIME_MEASUREMENT_MAX(ota, datalayer.system.status.time_ota_us);
 
     // Process
     currentMillis = millis();
     if (currentMillis - previousMillis10ms >= INTERVAL_10_MS) {
+      if ((currentMillis - previousMillis10ms >= INTERVAL_10_MS_DELAYED) &&
+          (milliseconds(currentMillis) > esp32hal->BOOTUP_TIME())) {
+        set_event(EVENT_TASK_OVERRUN, (currentMillis - previousMillis10ms));
+      }
       previousMillis10ms = currentMillis;
+      if (datalayer.system.info.performance_measurement_active) {
+        START_TIME_MEASUREMENT(10ms);
+      }
 
-      led_exe();
+      if (datalayer.system.info.performance_measurement_active) {
+        END_TIME_MEASUREMENT_MAX(10ms, datalayer.system.status.time_10ms_us);
+      }
+    }
+
+    if (currentMillis - previousMillisUpdateVal >= INTERVAL_1_S) {
+      previousMillisUpdateVal = currentMillis;  // Order matters on the update_loop!
+      if (datalayer.system.info.performance_measurement_active) {
+        START_TIME_MEASUREMENT(values);
+      }
+
+      // Fetch battery values
+      if (battery) {
+        battery->update_values();
+      }
+
+      // Update values heading towards inverter
+      if (inverter) {
+        inverter->update_values();
+      }
+
+      if (datalayer.system.info.performance_measurement_active) {
+        END_TIME_MEASUREMENT_MAX(values, datalayer.system.status.time_values_us);
+      }
+    }
+    if (datalayer.system.info.performance_measurement_active) {
+      START_TIME_MEASUREMENT(cantx);
     }
 
     // Let all transmitter objects send their messages
@@ -164,6 +217,32 @@ void core_loop(void*) {
       transmitter->transmit(currentMillis);
     }
 
+    if (datalayer.system.info.performance_measurement_active) {
+      END_TIME_MEASUREMENT_MAX(cantx, datalayer.system.status.time_cantx_us);
+      END_TIME_MEASUREMENT_MAX(all, datalayer.system.status.core_task_10s_max_us);
+      if (datalayer.system.status.core_task_10s_max_us > datalayer.system.status.core_task_max_us) {
+        // Update worst case total time
+        datalayer.system.status.core_task_max_us = datalayer.system.status.core_task_10s_max_us;
+        // Record snapshots of task times
+        datalayer.system.status.time_snap_comm_us = datalayer.system.status.time_comm_us;
+        datalayer.system.status.time_snap_10ms_us = datalayer.system.status.time_10ms_us;
+        datalayer.system.status.time_snap_values_us = datalayer.system.status.time_values_us;
+        datalayer.system.status.time_snap_cantx_us = datalayer.system.status.time_cantx_us;
+        datalayer.system.status.time_snap_ota_us = datalayer.system.status.time_ota_us;
+      }
+
+      datalayer.system.status.core_task_max_us =
+          MAX(datalayer.system.status.core_task_10s_max_us, datalayer.system.status.core_task_max_us);
+      if (core_task_timer_10s.elapsed()) {
+        datalayer.system.status.time_ota_us = 0;
+        datalayer.system.status.time_comm_us = 0;
+        datalayer.system.status.time_10ms_us = 0;
+        datalayer.system.status.time_values_us = 0;
+        datalayer.system.status.time_cantx_us = 0;
+        datalayer.system.status.core_task_10s_max_us = 0;
+        datalayer.system.status.wifi_task_10s_max_us = 0;
+      }
+    }
     esp_task_wdt_reset();  // Reset watchdog to prevent reset
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -176,7 +255,7 @@ void setup() {
   init_serial();
 
   // We print this after setting up serial, so that is also printed if configured to do so
-  DEBUG_PRINTF("LEAF Charger emulator %s build " __DATE__ " " __TIME__ "\n", version_number);
+  DEBUG_PRINTF("Battery emulator %s build " __DATE__ " " __TIME__ "\n", version_number);
 
   init_events();
 
@@ -187,9 +266,9 @@ void setup() {
                             &connectivity_loop_task, esp32hal->WIFICORE());
   }
 
-  led_init();
-
   setup_charger();
+  setup_inverter();
+  setup_battery();
 
   // Init CAN only after any CAN receivers have had a chance to register.
   init_CAN();

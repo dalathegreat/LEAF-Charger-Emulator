@@ -108,8 +108,9 @@ void wifi_monitor() {
   if ((hasConnectedBefore && (currentMillis - lastWiFiCheck > current_check_interval)) ||
       (!hasConnectedBefore && (currentMillis - lastWiFiCheck > INIT_WIFI_FULL_RECONNECT_INTERVAL))) {
 
-    DEBUG_PRINTF("Time to monitor Wi-Fi status: %d, %d, %d, %d, %d\n", hasConnectedBefore, currentMillis, lastWiFiCheck,
-                 current_check_interval, INIT_WIFI_FULL_RECONNECT_INTERVAL);
+    // Uncomment for testing, but otherwise this quickly fills up the log
+    //DEBUG_PRINTF("Wi-Fi status: %d, %d, %d, %d, %d\n", hasConnectedBefore, currentMillis, lastWiFiCheck,
+    //             current_check_interval, INIT_WIFI_FULL_RECONNECT_INTERVAL);
 
     lastWiFiCheck = currentMillis;
 
@@ -240,7 +241,6 @@ void init_mDNS() {
 }
 
 void init_WiFi_AP() {
-  ssidAP = std::string("BatteryEmulator") + WiFi.macAddress().c_str();
 
   DEBUG_PRINTF("Creating Access Point: %s\n", ssidAP.c_str());
   DEBUG_PRINTF("With password: %s\n", passwordAP.c_str());

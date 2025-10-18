@@ -32,6 +32,7 @@ extern const char* name_for_charger_type(ChargerType type) {
     case ChargerType::NissanLeaf:
       return NissanLeafCharger::Name;
     case ChargerType::None:
+    case ChargerType::Highest:
       return "None";
   }
 
@@ -43,7 +44,12 @@ void setup_charger() {
   switch (user_selected_charger_type) {
     case ChargerType::ChevyVolt:
       charger = new ChevyVoltCharger();
+      break;
     case ChargerType::NissanLeaf:
       charger = new NissanLeafCharger();
+      break;
+    case ChargerType::None:
+    case ChargerType::Highest:
+      break;
   }
 }
